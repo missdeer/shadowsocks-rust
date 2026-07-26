@@ -27,10 +27,27 @@ full = [
     "local-tunnel",
     "local-socks4",
     "aead-cipher",
+    "multi-protocol",
 ]
 
 # Enable local server
 local = ["httparse"]
+# Enable additional client-side primary protocols. Server implementations are
+# deliberately out of scope.
+multi-protocol = [
+    "local",
+    "local-http-rustls",
+    "dep:aws-lc-rs",
+    "dep:blake2",
+    "dep:h3",
+    "dep:h3-quinn",
+    "dep:md-5",
+    "dep:memchr",
+    "dep:quinn",
+    "dep:rcgen",
+    "dep:subtle",
+    "dep:x509-parser",
+]
 # Enable remote server
 server = []
 # Enable manager server
@@ -127,6 +144,20 @@ cfg-if = "1"
 pin-project = "1.1"
 thiserror = "2.0"
 arc-swap = "1.7"
+aws-lc-rs = { version = "1.17", optional = true, default-features = false }
+blake2 = { version = "0.10.6", optional = true }
+md-5 = { version = "0.11", optional = true }
+memchr = { version = "2.7", optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+quinn = { version = "0.11.11", optional = true, default-features = false, features = [
+    "futures-io",
+    "runtime-tokio",
+    "rustls-aws-lc-rs",
+] }
+rcgen = { version = "0.14.8", optional = true, default-features = false, features = ["aws_lc_rs", "pem"] }
+subtle = { version = "2.6.1", optional = true }
+x509-parser = { version = "0.18.1", optional = true, default-features = false, features = ["verify-aws"] }
 
 spin = { version = "0.12" }
 lru_time_cache = "0.11"

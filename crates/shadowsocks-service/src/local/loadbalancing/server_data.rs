@@ -134,6 +134,10 @@ impl ServerIdent {
         &mut self.svr_cfg.config
     }
 
+    pub fn server_protocol(&self) -> &crate::config::ServerProtocolConfig {
+        &self.svr_cfg.protocol
+    }
+
     pub fn server_instance_config(&self) -> &ServerInstanceConfig {
         &self.svr_cfg
     }

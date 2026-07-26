@@ -4,6 +4,8 @@ target
 /build/install
 /build/*.sha256
 /dev
+/conf/
+/conf-chain/
 /*.log
 /debian/*.log
 /.vscode

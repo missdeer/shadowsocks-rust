@@ -90,6 +90,7 @@ full = [
     "stream-cipher",
     "aead-cipher",
     "aead-cipher-2022",
+    "multi-protocol",
 ]
 
 # Full features with extra (non-stable)
@@ -104,6 +105,8 @@ full-extra = [
 
 # Enable local server
 local = ["shadowsocks-service/local"]
+# Enable client-side VMess / VLESS / Trojan and shared transports.
+multi-protocol = ["local", "shadowsocks-service/multi-protocol"]
 # Enable remote server
 server = ["shadowsocks-service/server"]
 # Enable manager server

@@ -38,16 +38,33 @@ use tokio::sync::Mutex;
 
 use crate::config::{OutboundProxy, OutboundProxyProtocol, PlainProxy};
 
+#[cfg(feature = "multi-protocol")]
+mod anytls;
 pub mod auth;
 pub mod chain;
 #[cfg(feature = "local-http")]
 pub mod http_connect;
+#[cfg(feature = "multi-protocol")]
+mod hysteria;
+#[cfg(feature = "multi-protocol")]
+mod protocol;
+#[cfg(feature = "multi-protocol")]
+mod reality;
+#[cfg(feature = "multi-protocol")]
+mod salamander;
 pub mod socks5;
 pub mod stream;
 pub mod tls;
 pub mod udp;
+#[cfg(feature = "multi-protocol")]
+mod vision;
+#[cfg(feature = "multi-protocol")]
+mod vmess;
+#[cfg(feature = "multi-protocol")]
+mod websocket;
 
 pub use auth::{HttpProxyAuth, Socks5Auth};
+pub use chain::connect_tcp_with_initial_server;
 pub use socks5::Socks5Negotiator;
 pub use stream::OutboundProxyStream;
 pub use udp::OutboundProxyDatagram;
