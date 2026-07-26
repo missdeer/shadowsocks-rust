@@ -17,8 +17,9 @@ use shadowsocks::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::{
+    config::ServerProtocolConfig,
     local::{context::ServiceContext, loadbalancing::ServerIdent},
-    net::{MonProxyStream, OutboundProxyStream, TcpDialer},
+    net::{MonProxyStream, OutboundProxyStream, TcpDialer, connect_tcp_with_initial_server},
 };
 
 use super::auto_proxy_io::AutoProxyIo;
@@ -239,7 +240,7 @@ impl AutoProxyClientStream {
         let target_addr: Address = addr.into();
 
         let dial_result = match context.outbound_client() {
-            None => {
+            None if matches!(server.server_protocol(), ServerProtocolConfig::Shadowsocks) => {
                 let ss_addr: Address = server.server_config().tcp_external_addr().into();
                 match TcpStream::connect_remote_with_opts(context.context_ref(), &ss_addr, connect_opts).await {
                     Ok(transport) => {
@@ -255,16 +256,32 @@ impl AutoProxyClientStream {
                     Err(err) => Err(err),
                 }
             }
+            None => {
+                let dialer = DirectTcpDialer {
+                    context: context.as_ref(),
+                    opts: connect_opts,
+                };
+                let shared_context = context.context();
+                connect_tcp_with_initial_server(
+                    &[],
+                    &shared_context,
+                    &dialer,
+                    server.server_instance_config(),
+                    &target_addr,
+                )
+                .await
+                .map(|stream| OutboundTransport::Chained(MonProxyStream::from_stream(stream, flow_stat.clone())))
+            }
             Some(client) => {
                 let dialer = DirectTcpDialer {
                     context: context.as_ref(),
                     opts: connect_opts,
                 };
                 client
-                    .connect_tcp_with_initial_shadowsocks(
+                    .connect_tcp_with_initial_server(
                         context.context(),
                         &dialer,
-                        server.server_config(),
+                        server.server_instance_config(),
                         &target_addr,
                     )
                     .await

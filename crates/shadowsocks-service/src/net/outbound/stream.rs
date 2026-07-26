@@ -17,6 +17,13 @@ use pin_project::pin_project;
 use shadowsocks::{net::TcpStream, relay::tcprelay::ProxyClientStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+#[cfg(feature = "multi-protocol")]
+use super::hysteria::HysteriaStream;
+#[cfg(feature = "multi-protocol")]
+use super::protocol::VlessClientStream;
+#[cfg(feature = "multi-protocol")]
+use super::vision::VisionStream;
+
 #[cfg(feature = "local-http")]
 use super::http_connect::HttpConnectTunnel;
 #[cfg(any(feature = "local-http-native-tls", feature = "local-http-rustls"))]
@@ -55,6 +62,34 @@ enum OutboundProxyStreamInner {
 
     /// Shadowsocks encryption layered on an inner outbound stream.
     Ss(#[pin] Box<ProxyClientStream<OutboundProxyStream>>),
+
+    /// VLESS tunnel with its response header consumed lazily on first read.
+    #[cfg(feature = "multi-protocol")]
+    Vless(#[pin] Box<VlessClientStream>),
+
+    /// WebSocket byte transport backed by framing tasks.
+    #[cfg(feature = "multi-protocol")]
+    WebSocket(#[pin] Box<tokio::io::DuplexStream>),
+
+    /// VMess AEAD byte stream backed by framing tasks.
+    #[cfg(feature = "multi-protocol")]
+    Vmess(#[pin] Box<tokio::io::DuplexStream>),
+
+    /// AnyTLS multiplexed byte stream backed by framing tasks.
+    #[cfg(feature = "multi-protocol")]
+    AnyTls(#[pin] Box<tokio::io::DuplexStream>),
+
+    /// Hysteria 1/2 native QUIC bidirectional stream.
+    #[cfg(feature = "multi-protocol")]
+    Hysteria(#[pin] Box<HysteriaStream>),
+
+    /// REALITY TLS 1.3 byte stream backed by a protocol task.
+    #[cfg(feature = "multi-protocol")]
+    Reality(#[pin] Box<tokio::io::DuplexStream>),
+
+    /// VLESS XTLS-RPRX-Vision over a REALITY client session.
+    #[cfg(feature = "multi-protocol")]
+    Vision(#[pin] Box<VisionStream<Box<OutboundProxyStream>>>),
 }
 
 impl OutboundProxyStream {
@@ -129,6 +164,62 @@ impl OutboundProxyStream {
         }
     }
 
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_vless(local_addr: SocketAddr, stream: VlessClientStream) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::Vless(Box::new(stream)),
+        }
+    }
+
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_websocket(local_addr: SocketAddr, stream: tokio::io::DuplexStream) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::WebSocket(Box::new(stream)),
+        }
+    }
+
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_vmess(local_addr: SocketAddr, stream: tokio::io::DuplexStream) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::Vmess(Box::new(stream)),
+        }
+    }
+
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_anytls(local_addr: SocketAddr, stream: tokio::io::DuplexStream) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::AnyTls(Box::new(stream)),
+        }
+    }
+
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_hysteria(local_addr: SocketAddr, stream: HysteriaStream) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::Hysteria(Box::new(stream)),
+        }
+    }
+
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_reality(local_addr: SocketAddr, stream: tokio::io::DuplexStream) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::Reality(Box::new(stream)),
+        }
+    }
+
+    #[cfg(feature = "multi-protocol")]
+    pub(super) fn from_vision(local_addr: SocketAddr, stream: VisionStream<Box<OutboundProxyStream>>) -> Self {
+        Self {
+            local_addr,
+            inner: OutboundProxyStreamInner::Vision(Box::new(stream)),
+        }
+    }
+
     /// Project the pinned `inner` enum.
     fn project_inner(self: Pin<&mut Self>) -> OutboundProxyStreamInnerProj<'_> {
         // SAFETY: `local_addr` is `Copy` and not pin-projected; only `inner`
@@ -158,6 +249,20 @@ impl AsyncRead for OutboundProxyStream {
             #[cfg(feature = "local-http")]
             OutboundProxyStreamInnerProj::Http(s) => s.poll_read(cx, buf),
             OutboundProxyStreamInnerProj::Ss(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vless(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::WebSocket(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vmess(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::AnyTls(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Hysteria(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Reality(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vision(s) => s.poll_read(cx, buf),
         }
     }
 }
@@ -171,6 +276,20 @@ impl AsyncWrite for OutboundProxyStream {
             #[cfg(feature = "local-http")]
             OutboundProxyStreamInnerProj::Http(s) => s.poll_write(cx, buf),
             OutboundProxyStreamInnerProj::Ss(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vless(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::WebSocket(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vmess(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::AnyTls(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Hysteria(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Reality(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vision(s) => s.poll_write(cx, buf),
         }
     }
 
@@ -182,6 +301,20 @@ impl AsyncWrite for OutboundProxyStream {
             #[cfg(feature = "local-http")]
             OutboundProxyStreamInnerProj::Http(s) => s.poll_flush(cx),
             OutboundProxyStreamInnerProj::Ss(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vless(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::WebSocket(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vmess(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::AnyTls(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Hysteria(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Reality(s) => s.poll_flush(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vision(s) => s.poll_flush(cx),
         }
     }
 
@@ -193,6 +326,20 @@ impl AsyncWrite for OutboundProxyStream {
             #[cfg(feature = "local-http")]
             OutboundProxyStreamInnerProj::Http(s) => s.poll_shutdown(cx),
             OutboundProxyStreamInnerProj::Ss(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vless(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::WebSocket(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vmess(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::AnyTls(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Hysteria(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Reality(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vision(s) => s.poll_shutdown(cx),
         }
     }
 
@@ -208,6 +355,20 @@ impl AsyncWrite for OutboundProxyStream {
             #[cfg(feature = "local-http")]
             OutboundProxyStreamInnerProj::Http(s) => s.poll_write_vectored(cx, bufs),
             OutboundProxyStreamInnerProj::Ss(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vless(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::WebSocket(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vmess(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::AnyTls(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Hysteria(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Reality(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInnerProj::Vision(s) => s.poll_write_vectored(cx, bufs),
         }
     }
 
@@ -220,6 +381,20 @@ impl AsyncWrite for OutboundProxyStream {
             #[cfg(feature = "local-http")]
             OutboundProxyStreamInner::Http(_) => false,
             OutboundProxyStreamInner::Ss(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::Vless(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::WebSocket(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::Vmess(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::AnyTls(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::Hysteria(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::Reality(s) => s.is_write_vectored(),
+            #[cfg(feature = "multi-protocol")]
+            OutboundProxyStreamInner::Vision(s) => s.is_write_vectored(),
         }
     }
 }

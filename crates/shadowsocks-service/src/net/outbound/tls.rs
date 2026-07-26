@@ -66,18 +66,33 @@ impl OutboundTlsStream {
 /// Establish a TLS session on top of an existing outbound proxy stream.
 #[cfg(any(feature = "local-http-native-tls", feature = "local-http-rustls"))]
 pub async fn tls_connect(stream: OutboundProxyStream, domain: &str) -> io::Result<OutboundTlsStream> {
-    tls_connect_inner(Box::new(stream), domain).await
+    tls_connect_with_options(stream, domain, false, &["h2".to_owned(), "http/1.1".to_owned()]).await
+}
+
+/// Establish TLS with protocol-specific verification and ALPN settings.
+#[cfg(any(feature = "local-http-native-tls", feature = "local-http-rustls"))]
+pub async fn tls_connect_with_options(
+    stream: OutboundProxyStream,
+    domain: &str,
+    skip_certificate_verification: bool,
+    alpn: &[String],
+) -> io::Result<OutboundTlsStream> {
+    tls_connect_inner(Box::new(stream), domain, skip_certificate_verification, alpn).await
 }
 
 #[cfg(all(feature = "local-http-native-tls", not(feature = "local-http-rustls")))]
 async fn tls_connect_inner(
     stream: Box<OutboundProxyStream>,
     domain: &str,
+    skip_certificate_verification: bool,
+    alpn: &[String],
 ) -> io::Result<OutboundTlsStream> {
     use native_tls::TlsConnector;
 
+    let alpn = alpn.iter().map(String::as_str).collect::<Vec<_>>();
     let cx = TlsConnector::builder()
-        .request_alpns(&["h2", "http/1.1"])
+        .danger_accept_invalid_certs(skip_certificate_verification)
+        .request_alpns(&alpn)
         .build()
         .map_err(|err| io::Error::other(format!("tls build: {err}")))?;
     let cx = tokio_native_tls::TlsConnector::from(cx);
@@ -100,44 +115,15 @@ async fn tls_connect_inner(
 async fn tls_connect_inner(
     stream: Box<OutboundProxyStream>,
     domain: &str,
+    skip_certificate_verification: bool,
+    alpn: &[String],
 ) -> io::Result<OutboundTlsStream> {
-    use std::sync::{Arc, LazyLock};
+    use std::sync::Arc;
 
-    use log::warn;
-    use rustls_native_certs::CertificateResult;
-    use tokio_rustls::{
-        TlsConnector,
-        rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
-    };
+    use tokio_rustls::{TlsConnector, rustls::pki_types::ServerName};
 
-    static TLS_CONFIG: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
-        let mut config = ClientConfig::builder()
-            .with_root_certificates({
-                let mut store = RootCertStore::empty();
-                store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-                let CertificateResult { certs, errors, .. } = rustls_native_certs::load_native_certs();
-                if !errors.is_empty() {
-                    for error in errors {
-                        warn!("failed to load cert (native), error: {}", error);
-                    }
-                }
-
-                for cert in certs {
-                    if let Err(err) = store.add(cert) {
-                        warn!("failed to add cert (native), error: {}", err);
-                    }
-                }
-
-                store
-            })
-            .with_no_client_auth();
-
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Arc::new(config)
-    });
-
-    let connector = TlsConnector::from(TLS_CONFIG.clone());
+    let config = rustls_client_config_with_options(skip_certificate_verification, alpn)?;
+    let connector = TlsConnector::from(Arc::new(config));
 
     let host = ServerName::try_from(domain)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid dnsname \"{domain}\"")))?
@@ -148,6 +134,104 @@ async fn tls_connect_inner(
     let h2 = matches!(session.alpn_protocol(), Some(b"h2"));
 
     Ok(OutboundTlsStream::Rustls(tls_stream, h2))
+}
+
+/// Build the common rustls client configuration used by TCP/TLS and QUIC
+/// primary protocols. Keeping certificate loading and the explicit insecure
+/// mode in one place prevents the two transports from drifting apart.
+#[cfg(feature = "local-http-rustls")]
+pub(crate) fn rustls_client_config_with_options(
+    skip_certificate_verification: bool,
+    alpn: &[String],
+) -> io::Result<tokio_rustls::rustls::ClientConfig> {
+    use std::sync::Arc;
+
+    use log::warn;
+    use rustls_native_certs::CertificateResult;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+    let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|err| io::Error::other(format!("tls versions: {err}")))?;
+    let builder = if skip_certificate_verification {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(DisabledCertificateVerifier {
+                supported_algorithms: provider.signature_verification_algorithms,
+            }))
+    } else {
+        builder.with_root_certificates({
+            let mut store = RootCertStore::empty();
+            store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+            let CertificateResult { certs, errors, .. } = rustls_native_certs::load_native_certs();
+            for error in errors {
+                warn!("failed to load cert (native), error: {}", error);
+            }
+            for cert in certs {
+                if let Err(err) = store.add(cert) {
+                    warn!("failed to add cert (native), error: {}", err);
+                }
+            }
+            store
+        })
+    };
+    let mut config = builder.with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.as_bytes().to_vec()).collect();
+    Ok(config)
+}
+
+#[cfg(feature = "local-http-rustls")]
+#[derive(Debug)]
+struct DisabledCertificateVerifier {
+    supported_algorithms: tokio_rustls::rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+#[cfg(feature = "local-http-rustls")]
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for DisabledCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        signature: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        tokio_rustls::rustls::crypto::verify_tls12_signature(
+            message,
+            certificate,
+            signature,
+            &self.supported_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        signature: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        tokio_rustls::rustls::crypto::verify_tls13_signature(
+            message,
+            certificate,
+            signature,
+            &self.supported_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        self.supported_algorithms.supported_schemes()
+    }
 }
 
 #[cfg(any(feature = "local-http-native-tls", feature = "local-http-rustls"))]
@@ -189,6 +273,19 @@ impl AsyncWrite for OutboundTlsStream {
 // builds.
 #[cfg(not(any(feature = "local-http-native-tls", feature = "local-http-rustls")))]
 pub async fn tls_connect<S>(_stream: S, _domain: &str) -> io::Result<S>
+where
+    S: AsyncRead + AsyncWrite,
+{
+    tls_unsupported()
+}
+
+#[cfg(not(any(feature = "local-http-native-tls", feature = "local-http-rustls")))]
+pub async fn tls_connect_with_options<S>(
+    _stream: S,
+    _domain: &str,
+    _skip_certificate_verification: bool,
+    _alpn: &[String],
+) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite,
 {

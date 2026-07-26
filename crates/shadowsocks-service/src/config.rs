@@ -579,13 +579,13 @@ struct SSLocalExtConfig {
     acl: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct SSServerUserConfig {
     name: String,
     password: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct SSServerExtConfig {
     // SIP008 https://github.com/shadowsocks/shadowsocks-org/issues/89
     //
@@ -597,7 +597,60 @@ struct SSServerExtConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<String>,
-    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
+
+    /// Primary client protocol. Missing means `shadowsocks` for backwards
+    /// compatibility. These fields intentionally follow shadowsocks-rust's
+    /// existing snake_case JSON/JSON5 style; this is not a Clash importer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cipher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alter_id: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ws_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ws_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_certificate_verification: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alpn: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packet_encoding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reality_public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reality_short_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reality_spider_x: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    obfs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    obfs_password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    up_mbps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    down_mbps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_session_check_interval: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_session_timeout: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_idle_sessions: Option<usize>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     users: Option<Vec<SSServerUserConfig>>,
@@ -655,6 +708,308 @@ struct SSServerExtConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     outbound_proxy: Option<SSOutboundProxyConfig>,
+}
+
+impl SSServerExtConfig {
+    fn primary_protocol(&self) -> Result<ServerProtocolConfig, Error> {
+        let protocol = self.protocol.as_deref().unwrap_or("shadowsocks").to_ascii_lowercase();
+        match protocol.as_str() {
+            "ss" | "shadowsocks" => Ok(ServerProtocolConfig::Shadowsocks),
+            "vmess" => {
+                let uuid = self.required_string(self.uuid.as_ref(), "uuid")?;
+                let cipher = self.cipher.clone().unwrap_or_else(|| "auto".to_owned());
+                if !matches!(cipher.as_str(), "auto" | "aes-128-gcm" | "chacha20-poly1305" | "none") {
+                    return Err(Error::new(
+                        ErrorKind::Invalid,
+                        "unsupported VMess cipher",
+                        Some("supported ciphers: auto, aes-128-gcm, chacha20-poly1305, none".to_owned()),
+                    ));
+                }
+                let alter_id = self.alter_id.unwrap_or(0);
+                if alter_id != 0 {
+                    return Err(Error::new(
+                        ErrorKind::Invalid,
+                        "legacy VMess alter_id is not supported",
+                        Some("set `alter_id` to 0 for VMess AEAD".to_owned()),
+                    ));
+                }
+                Ok(ServerProtocolConfig::Vmess {
+                    uuid,
+                    cipher,
+                    alter_id,
+                    transport: self.transport()?,
+                    security: self.transport_security("none")?,
+                })
+            }
+            "vless" => Ok(ServerProtocolConfig::Vless {
+                uuid: self.required_string(self.uuid.as_ref(), "uuid")?,
+                flow: self.flow.clone(),
+                packet_encoding: self.packet_encoding.clone(),
+                transport: self.transport()?,
+                security: self.transport_security("none")?,
+            }),
+            "trojan" => Ok(ServerProtocolConfig::Trojan {
+                password: self.required_secret(self.password.as_ref(), "password")?,
+                transport: self.transport()?,
+                security: self.transport_security("tls")?,
+            }),
+            "hysteria" => Ok(ServerProtocolConfig::Hysteria {
+                password: self.required_secret(self.password.as_ref(), "password")?,
+                server_name: self.server_name.clone().unwrap_or_else(|| self.server.clone()),
+                skip_certificate_verification: self.skip_certificate_verification.unwrap_or(false),
+                alpn: self.alpn.clone().unwrap_or_default(),
+                up_mbps: self.up_mbps,
+                down_mbps: self.down_mbps,
+            }),
+            "hysteria2" | "hy2" => {
+                if self.obfs.is_some() != self.obfs_password.is_some() {
+                    return Err(Error::new(
+                        ErrorKind::MissingField,
+                        "Hysteria 2 obfuscation requires both `obfs` and `obfs_password`",
+                        None,
+                    ));
+                }
+                Ok(ServerProtocolConfig::Hysteria2 {
+                    password: self.required_secret(self.password.as_ref(), "password")?,
+                    server_name: self.server_name.clone().unwrap_or_else(|| self.server.clone()),
+                    skip_certificate_verification: self.skip_certificate_verification.unwrap_or(false),
+                    obfs: self.obfs.clone(),
+                    obfs_password: self
+                        .obfs_password
+                        .as_ref()
+                        .map(|value| read_variable_field_value(value).into_owned()),
+                    up_mbps: self.up_mbps,
+                    down_mbps: self.down_mbps,
+                })
+            }
+            "anytls" => Ok(ServerProtocolConfig::AnyTls {
+                password: self.required_secret(self.password.as_ref(), "password")?,
+                server_name: self.server_name.clone().unwrap_or_else(|| self.server.clone()),
+                skip_certificate_verification: self.skip_certificate_verification.unwrap_or(false),
+                alpn: self.alpn.clone().unwrap_or_default(),
+                idle_session_check_interval: self.idle_session_check_interval.map(Duration::from_secs),
+                idle_session_timeout: self.idle_session_timeout.map(Duration::from_secs),
+                min_idle_sessions: self.min_idle_sessions,
+            }),
+            _ => Err(Error::new(
+                ErrorKind::Invalid,
+                "unsupported primary server protocol",
+                Some(format!(
+                    "`{protocol}` is not one of shadowsocks, vmess, vless, trojan, hysteria, hysteria2, anytls"
+                )),
+            )),
+        }
+    }
+
+    fn transport(&self) -> Result<ServerTransportConfig, Error> {
+        match self.network.as_deref().unwrap_or("tcp").to_ascii_lowercase().as_str() {
+            "tcp" => Ok(ServerTransportConfig::Tcp),
+            "ws" | "websocket" => Ok(ServerTransportConfig::WebSocket {
+                path: self.ws_path.clone().unwrap_or_else(|| "/".to_owned()),
+                host: self.ws_host.clone(),
+            }),
+            network => Err(Error::new(
+                ErrorKind::Invalid,
+                "unsupported primary server transport",
+                Some(format!("`{network}` is not one of tcp, websocket")),
+            )),
+        }
+    }
+
+    fn transport_security(&self, default: &str) -> Result<ServerTransportSecurity, Error> {
+        match self
+            .security
+            .as_deref()
+            .unwrap_or(default)
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "none" => Ok(ServerTransportSecurity::None),
+            "tls" => Ok(ServerTransportSecurity::Tls {
+                server_name: self.server_name.clone().unwrap_or_else(|| self.server.clone()),
+                skip_certificate_verification: self.skip_certificate_verification.unwrap_or(false),
+                alpn: self.alpn.clone().unwrap_or_default(),
+            }),
+            "reality" => Ok(ServerTransportSecurity::Reality {
+                server_name: self.server_name.clone().unwrap_or_else(|| self.server.clone()),
+                public_key: self.required_string(self.reality_public_key.as_ref(), "reality_public_key")?,
+                short_id: self.required_string(self.reality_short_id.as_ref(), "reality_short_id")?,
+                spider_x: self.reality_spider_x.clone().unwrap_or_else(|| "/".to_owned()),
+                fingerprint: self.fingerprint.clone().unwrap_or_else(|| "chrome".to_owned()),
+            }),
+            security => Err(Error::new(
+                ErrorKind::Invalid,
+                "unsupported primary server security",
+                Some(format!("`{security}` is not one of none, tls, reality")),
+            )),
+        }
+    }
+
+    fn required_string(&self, value: Option<&String>, field: &str) -> Result<String, Error> {
+        match value {
+            Some(value) if !value.is_empty() => Ok(value.clone()),
+            _ => Err(Error::new(
+                ErrorKind::MissingField,
+                "required primary protocol field is missing",
+                Some(format!(
+                    "`{field}` is required for protocol {}",
+                    self.protocol.as_deref().unwrap_or("shadowsocks")
+                )),
+            )),
+        }
+    }
+
+    fn required_secret(&self, value: Option<&String>, field: &str) -> Result<String, Error> {
+        let value = self.required_string(value, field)?;
+        Ok(read_variable_field_value(&value).into_owned())
+    }
+
+    fn set_primary_protocol(&mut self, protocol: &ServerProtocolConfig) {
+        match protocol {
+            ServerProtocolConfig::Shadowsocks => {}
+            ServerProtocolConfig::Vmess {
+                uuid,
+                cipher,
+                alter_id,
+                transport,
+                security,
+            } => {
+                self.set_non_shadowsocks_protocol("vmess");
+                self.uuid = Some(uuid.clone());
+                self.cipher = Some(cipher.clone());
+                self.alter_id = Some(*alter_id);
+                self.set_transport(transport);
+                self.set_transport_security(security);
+            }
+            ServerProtocolConfig::Vless {
+                uuid,
+                flow,
+                packet_encoding,
+                transport,
+                security,
+            } => {
+                self.set_non_shadowsocks_protocol("vless");
+                self.uuid = Some(uuid.clone());
+                self.flow.clone_from(flow);
+                self.packet_encoding.clone_from(packet_encoding);
+                self.set_transport(transport);
+                self.set_transport_security(security);
+            }
+            ServerProtocolConfig::Trojan {
+                password,
+                transport,
+                security,
+            } => {
+                self.set_non_shadowsocks_protocol("trojan");
+                self.password = Some(password.clone());
+                self.set_transport(transport);
+                self.set_transport_security(security);
+            }
+            ServerProtocolConfig::Hysteria {
+                password,
+                server_name,
+                skip_certificate_verification,
+                alpn,
+                up_mbps,
+                down_mbps,
+            } => {
+                self.set_non_shadowsocks_protocol("hysteria");
+                self.password = Some(password.clone());
+                self.server_name = Some(server_name.clone());
+                self.skip_certificate_verification = Some(*skip_certificate_verification);
+                self.alpn = Some(alpn.clone());
+                self.up_mbps = *up_mbps;
+                self.down_mbps = *down_mbps;
+            }
+            ServerProtocolConfig::Hysteria2 {
+                password,
+                server_name,
+                skip_certificate_verification,
+                obfs,
+                obfs_password,
+                up_mbps,
+                down_mbps,
+            } => {
+                self.set_non_shadowsocks_protocol("hysteria2");
+                self.password = Some(password.clone());
+                self.server_name = Some(server_name.clone());
+                self.skip_certificate_verification = Some(*skip_certificate_verification);
+                self.obfs.clone_from(obfs);
+                self.obfs_password.clone_from(obfs_password);
+                self.up_mbps = *up_mbps;
+                self.down_mbps = *down_mbps;
+            }
+            ServerProtocolConfig::AnyTls {
+                password,
+                server_name,
+                skip_certificate_verification,
+                alpn,
+                idle_session_check_interval,
+                idle_session_timeout,
+                min_idle_sessions,
+            } => {
+                self.set_non_shadowsocks_protocol("anytls");
+                self.password = Some(password.clone());
+                self.server_name = Some(server_name.clone());
+                self.skip_certificate_verification = Some(*skip_certificate_verification);
+                self.alpn = Some(alpn.clone());
+                self.idle_session_check_interval = idle_session_check_interval.map(|value| value.as_secs());
+                self.idle_session_timeout = idle_session_timeout.map(|value| value.as_secs());
+                self.min_idle_sessions = *min_idle_sessions;
+            }
+        }
+    }
+
+    fn set_non_shadowsocks_protocol(&mut self, protocol: &str) {
+        self.protocol = Some(protocol.to_owned());
+        self.method = None;
+        self.users = None;
+        self.plugin = None;
+        self.plugin_opts = None;
+        self.plugin_args = None;
+        self.plugin_mode = None;
+    }
+
+    fn set_transport(&mut self, transport: &ServerTransportConfig) {
+        match transport {
+            ServerTransportConfig::Tcp => self.network = Some("tcp".to_owned()),
+            ServerTransportConfig::WebSocket { path, host } => {
+                self.network = Some("websocket".to_owned());
+                self.ws_path = Some(path.clone());
+                self.ws_host.clone_from(host);
+            }
+        }
+    }
+
+    fn set_transport_security(&mut self, security: &ServerTransportSecurity) {
+        match security {
+            ServerTransportSecurity::None => self.security = Some("none".to_owned()),
+            ServerTransportSecurity::Tls {
+                server_name,
+                skip_certificate_verification,
+                alpn,
+            } => {
+                self.security = Some("tls".to_owned());
+                self.server_name = Some(server_name.clone());
+                self.skip_certificate_verification = Some(*skip_certificate_verification);
+                self.alpn = Some(alpn.clone());
+            }
+            ServerTransportSecurity::Reality {
+                server_name,
+                public_key,
+                short_id,
+                spider_x,
+                fingerprint,
+            } => {
+                self.security = Some("reality".to_owned());
+                self.server_name = Some(server_name.clone());
+                self.reality_public_key = Some(public_key.clone());
+                self.reality_short_id = Some(short_id.clone());
+                self.reality_spider_x = Some(spider_x.clone());
+                self.fingerprint = Some(fingerprint.clone());
+            }
+        }
+    }
 }
 
 #[cfg(feature = "local-online-config")]
@@ -1492,11 +1847,211 @@ pub enum LocalFlowStatAddress {
     TcpStreamAddr(SocketAddr),
 }
 
+/// Transport used below a TCP-oriented primary proxy protocol.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ServerTransportConfig {
+    #[default]
+    Tcp,
+    WebSocket {
+        path: String,
+        host: Option<String>,
+    },
+}
+
+/// Security layer used below a TCP-oriented primary proxy protocol.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ServerTransportSecurity {
+    #[default]
+    None,
+    Tls {
+        server_name: String,
+        skip_certificate_verification: bool,
+        alpn: Vec<String>,
+    },
+    Reality {
+        server_name: String,
+        public_key: String,
+        short_id: String,
+        spider_x: String,
+        fingerprint: String,
+    },
+}
+
+/// Client-side wire protocol used by a primary server.
+///
+/// [`ServerInstanceConfig::config`] remains the common source of address,
+/// timeout, mode and balancing metadata. Keeping protocol selection separate
+/// lets local mode support additional protocols without changing the server
+/// implementation or the existing `outbound_proxy` hop model.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub enum ServerProtocolConfig {
+    /// The existing Shadowsocks client protocol.
+    #[default]
+    Shadowsocks,
+    Vmess {
+        uuid: String,
+        cipher: String,
+        alter_id: u16,
+        transport: ServerTransportConfig,
+        security: ServerTransportSecurity,
+    },
+    Vless {
+        uuid: String,
+        flow: Option<String>,
+        packet_encoding: Option<String>,
+        transport: ServerTransportConfig,
+        security: ServerTransportSecurity,
+    },
+    Trojan {
+        password: String,
+        transport: ServerTransportConfig,
+        security: ServerTransportSecurity,
+    },
+    Hysteria {
+        password: String,
+        server_name: String,
+        skip_certificate_verification: bool,
+        alpn: Vec<String>,
+        up_mbps: Option<u64>,
+        down_mbps: Option<u64>,
+    },
+    Hysteria2 {
+        password: String,
+        server_name: String,
+        skip_certificate_verification: bool,
+        obfs: Option<String>,
+        obfs_password: Option<String>,
+        up_mbps: Option<u64>,
+        down_mbps: Option<u64>,
+    },
+    AnyTls {
+        password: String,
+        server_name: String,
+        skip_certificate_verification: bool,
+        alpn: Vec<String>,
+        idle_session_check_interval: Option<Duration>,
+        idle_session_timeout: Option<Duration>,
+        min_idle_sessions: Option<usize>,
+    },
+}
+
+impl ServerProtocolConfig {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Shadowsocks => "shadowsocks",
+            Self::Vmess { .. } => "vmess",
+            Self::Vless { .. } => "vless",
+            Self::Trojan { .. } => "trojan",
+            Self::Hysteria { .. } => "hysteria",
+            Self::Hysteria2 { .. } => "hysteria2",
+            Self::AnyTls { .. } => "anytls",
+        }
+    }
+}
+
+impl Debug for ServerProtocolConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("ServerProtocolConfig");
+        debug.field("protocol", &self.name());
+        match self {
+            Self::Shadowsocks => {}
+            Self::Vmess {
+                cipher,
+                alter_id,
+                transport,
+                security,
+                ..
+            } => {
+                debug
+                    .field("uuid", &"<redacted>")
+                    .field("cipher", cipher)
+                    .field("alter_id", alter_id)
+                    .field("transport", transport)
+                    .field("security", security);
+            }
+            Self::Vless {
+                flow,
+                packet_encoding,
+                transport,
+                security,
+                ..
+            } => {
+                debug
+                    .field("uuid", &"<redacted>")
+                    .field("flow", flow)
+                    .field("packet_encoding", packet_encoding)
+                    .field("transport", transport)
+                    .field("security", security);
+            }
+            Self::Trojan {
+                transport, security, ..
+            } => {
+                debug
+                    .field("password", &"<redacted>")
+                    .field("transport", transport)
+                    .field("security", security);
+            }
+            Self::Hysteria {
+                server_name,
+                skip_certificate_verification,
+                up_mbps,
+                down_mbps,
+                ..
+            } => {
+                debug
+                    .field("password", &"<redacted>")
+                    .field("server_name", server_name)
+                    .field("skip_certificate_verification", skip_certificate_verification)
+                    .field("up_mbps", up_mbps)
+                    .field("down_mbps", down_mbps);
+            }
+            Self::Hysteria2 {
+                server_name,
+                skip_certificate_verification,
+                obfs,
+                up_mbps,
+                down_mbps,
+                ..
+            } => {
+                debug
+                    .field("password", &"<redacted>")
+                    .field("server_name", server_name)
+                    .field("skip_certificate_verification", skip_certificate_verification)
+                    .field("obfs", obfs)
+                    .field("obfs_password", &"<redacted>")
+                    .field("up_mbps", up_mbps)
+                    .field("down_mbps", down_mbps);
+            }
+            Self::AnyTls {
+                server_name,
+                skip_certificate_verification,
+                alpn,
+                idle_session_check_interval,
+                idle_session_timeout,
+                min_idle_sessions,
+                ..
+            } => {
+                debug
+                    .field("password", &"<redacted>")
+                    .field("server_name", server_name)
+                    .field("skip_certificate_verification", skip_certificate_verification)
+                    .field("alpn", alpn)
+                    .field("idle_session_check_interval", idle_session_check_interval)
+                    .field("idle_session_timeout", idle_session_timeout)
+                    .field("min_idle_sessions", min_idle_sessions);
+            }
+        }
+        debug.finish()
+    }
+}
+
 /// Server instance config
 #[derive(Debug, Clone)]
 pub struct ServerInstanceConfig {
     /// Server's config
     pub config: ServerConfig,
+    /// Client-side protocol spoken to this primary server.
+    pub protocol: ServerProtocolConfig,
     /// Server's private ACL, set to `None` will use the global `AccessControl`
     pub acl: Option<AccessControl>,
     /// Server's outbound fwmark / address / interface to support split tunnel
@@ -1517,6 +2072,7 @@ impl ServerInstanceConfig {
     pub fn with_server_config(config: ServerConfig) -> Self {
         Self {
             config,
+            protocol: ServerProtocolConfig::Shadowsocks,
             acl: None,
             #[cfg(any(target_os = "linux", target_os = "android"))]
             outbound_fwmark: None,
@@ -2302,6 +2858,18 @@ impl Config {
                     continue;
                 }
 
+                let primary_protocol = svr.primary_protocol()?;
+                if !matches!(primary_protocol, ServerProtocolConfig::Shadowsocks) && config_type != ConfigType::Local {
+                    return Err(Error::new(
+                        ErrorKind::Invalid,
+                        "non-Shadowsocks primary protocols are client-only",
+                        Some(format!(
+                            "protocol `{}` cannot be used by {config_type:?}",
+                            primary_protocol.name()
+                        )),
+                    ));
+                }
+
                 let address = svr.server;
                 let port = svr.server_port;
 
@@ -2313,33 +2881,40 @@ impl Config {
                     },
                 };
 
-                let method = match svr.method.parse::<CipherKind>() {
-                    Ok(m) => m,
-                    Err(..) => {
-                        let err = Error::new(
+                let (method, password) = if matches!(primary_protocol, ServerProtocolConfig::Shadowsocks) {
+                    let method_name = svr.method.as_deref().ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::MissingField,
+                            "`method` is required for Shadowsocks servers",
+                            None,
+                        )
+                    })?;
+                    let method = method_name.parse::<CipherKind>().map_err(|_| {
+                        Error::new(
                             ErrorKind::Invalid,
                             "unsupported method",
-                            Some(format!("`{}` is not a supported method", svr.method)),
-                        );
-                        return Err(err);
-                    }
-                };
+                            Some(format!("`{method_name}` is not a supported method")),
+                        )
+                    })?;
 
-                // Only "password" support getting from environment variable.
-                let password = match svr.password {
-                    Some(ref pwd) => read_variable_field_value(pwd),
-                    None => {
-                        if method.is_none() {
-                            String::new().into()
-                        } else {
-                            let err = Error::new(
+                    // Only "password" support getting from environment variable.
+                    let password = match svr.password {
+                        Some(ref pwd) => read_variable_field_value(pwd),
+                        None if method.is_none() => String::new().into(),
+                        None => {
+                            return Err(Error::new(
                                 ErrorKind::MissingField,
                                 "`password` is required",
                                 Some(format!("`password` is required for method {method}")),
-                            );
-                            return Err(err);
+                            ));
                         }
-                    }
+                    };
+                    (method, password)
+                } else {
+                    // `ServerConfig` supplies common address/weight/timeout
+                    // metadata; non-SS handshakes never use this placeholder
+                    // cipher or password.
+                    (CipherKind::NONE, String::new().into())
                 };
 
                 let mut nsvr = match ServerConfig::new(addr, password, method) {
@@ -2355,8 +2930,19 @@ impl Config {
                 };
                 nsvr.set_source(server_source);
 
+                if !matches!(primary_protocol, ServerProtocolConfig::Shadowsocks) {
+                    nsvr.set_mode(Mode::TcpOnly);
+                }
+
                 // Extensible Identity Header, Users
                 if let Some(users) = svr.users {
+                    if !matches!(primary_protocol, ServerProtocolConfig::Shadowsocks) {
+                        return Err(Error::new(
+                            ErrorKind::Invalid,
+                            "`users` is only valid for Shadowsocks servers",
+                            None,
+                        ));
+                    }
                     let mut user_manager = ServerUserManager::new();
 
                     for user in users {
@@ -2380,7 +2966,18 @@ impl Config {
 
                 match svr.mode {
                     Some(mode) => match mode.parse::<Mode>() {
-                        Ok(mode) => nsvr.set_mode(mode),
+                        Ok(mode)
+                            if matches!(primary_protocol, ServerProtocolConfig::Shadowsocks) || !mode.enable_udp() =>
+                        {
+                            nsvr.set_mode(mode)
+                        }
+                        Ok(_) => {
+                            return Err(Error::new(
+                                ErrorKind::Invalid,
+                                "UDP mode is not implemented for non-Shadowsocks primary protocols",
+                                None,
+                            ));
+                        }
                         Err(..) => {
                             let err = Error::new(ErrorKind::Invalid, "invalid `mode`", None);
                             return Err(err);
@@ -2395,6 +2992,13 @@ impl Config {
                 }
 
                 if let Some(p) = svr.plugin {
+                    if !matches!(primary_protocol, ServerProtocolConfig::Shadowsocks) {
+                        return Err(Error::new(
+                            ErrorKind::Invalid,
+                            "SIP003 `plugin` is only valid for Shadowsocks servers",
+                            None,
+                        ));
+                    }
                     // SIP008 allows "plugin" to be an empty string
                     // Empty string implies "no plugin"
                     if !p.is_empty() {
@@ -2451,6 +3055,7 @@ impl Config {
                 }
 
                 let mut server_instance = ServerInstanceConfig::with_server_config(nsvr);
+                server_instance.protocol = primary_protocol;
 
                 if let Some(acl_path) = svr.acl {
                     let acl = match AccessControl::load_from_file(&acl_path) {
@@ -3237,7 +3842,9 @@ impl fmt::Display for Config {
         match self.server.len() {
             0 => {}
             // For 1 server, uses standard configure format
-            1 if self.server[0].config.is_basic() => {
+            1 if matches!(self.server[0].protocol, ServerProtocolConfig::Shadowsocks)
+                && self.server[0].config.is_basic() =>
+            {
                 let inst = &self.server[0];
                 let svr = &inst.config;
 
@@ -3287,7 +3894,7 @@ impl fmt::Display for Config {
                 for inst in &self.server {
                     let svr = &inst.config;
 
-                    vsvr.push(SSServerExtConfig {
+                    let mut jsvr = SSServerExtConfig {
                         server: match *svr.addr() {
                             ServerAddr::SocketAddr(ref sa) => sa.ip().to_string(),
                             ServerAddr::DomainName(ref dm, ..) => dm.to_string(),
@@ -3301,7 +3908,31 @@ impl fmt::Display for Config {
                         } else {
                             Some(svr.export_password())
                         },
-                        method: svr.method().to_string(),
+                        method: Some(svr.method().to_string()),
+                        protocol: None,
+                        uuid: None,
+                        cipher: None,
+                        alter_id: None,
+                        network: None,
+                        ws_path: None,
+                        ws_host: None,
+                        security: None,
+                        server_name: None,
+                        skip_certificate_verification: None,
+                        alpn: None,
+                        flow: None,
+                        packet_encoding: None,
+                        reality_public_key: None,
+                        reality_short_id: None,
+                        reality_spider_x: None,
+                        fingerprint: None,
+                        obfs: None,
+                        obfs_password: None,
+                        up_mbps: None,
+                        down_mbps: None,
+                        idle_session_check_interval: None,
+                        idle_session_timeout: None,
+                        min_idle_sessions: None,
                         users: svr.user_manager().map(|m| {
                             let mut vu = Vec::new();
                             for u in m.users_iter() {
@@ -3356,7 +3987,9 @@ impl fmt::Display for Config {
                         outbound_udp_allow_fragmentation: inst.outbound_udp_allow_fragmentation,
                         inbound_udp_allow_fragmentation: inst.inbound_udp_allow_fragmentation,
                         outbound_proxy: SSOutboundProxyConfig::from_proxies(&inst.outbound_proxy),
-                    });
+                    };
+                    jsvr.set_primary_protocol(&inst.protocol);
+                    vsvr.push(jsvr);
                 }
 
                 jconf.servers = Some(vsvr);
@@ -3527,9 +4160,9 @@ pub fn read_variable_field_value(value: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::OutboundProxy;
     #[cfg(feature = "local")]
     use super::{Config, ConfigType};
+    use super::{OutboundProxy, ServerProtocolConfig, ServerTransportConfig, ServerTransportSecurity};
 
     #[test]
     fn outbound_proxy_url_without_auth() {
@@ -3605,5 +4238,99 @@ mod tests {
         };
         assert_eq!(landing.svr_cfg.addr().to_string(), "landing.example.com:8388");
         assert!(landing.svr_cfg.plugin().is_none());
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn parses_and_serializes_client_primary_protocols() {
+        let source = r#"
+        {
+          "servers": [
+            {
+              "protocol": "vmess", "server": "vmess.invalid", "server_port": 80,
+              "uuid": "550e8400-e29b-41d4-a716-446655440000", "cipher": "auto",
+              "network": "websocket", "ws_path": "/proxy", "ws_host": "cdn.invalid"
+            },
+            {
+              "protocol": "vless", "server": "vless.invalid", "server_port": 443,
+              "uuid": "550e8400-e29b-41d4-a716-446655440000", "security": "reality",
+              "server_name": "cover.invalid", "reality_public_key": "public-key",
+              "reality_short_id": "0123456789abcdef", "flow": "xtls-rprx-vision"
+            },
+            {
+              "protocol": "trojan", "server": "trojan.invalid", "server_port": 443,
+              "password": "trojan-secret"
+            },
+            {
+              "protocol": "hysteria2", "server": "hy2.invalid", "server_port": 443,
+              "password": "hy2-secret", "skip_certificate_verification": true,
+              "up_mbps": 20, "down_mbps": 100
+            },
+            {
+              "protocol": "anytls", "server": "anytls.invalid", "server_port": 443,
+              "password": "anytls-secret", "alpn": ["h2", "http/1.1"],
+              "idle_session_timeout": 30, "min_idle_sessions": 2
+            }
+          ]
+        }
+        "#;
+
+        let config = Config::load_from_str(source, ConfigType::Local).expect("multi-protocol config");
+        assert_eq!(config.server.len(), 5);
+        assert!(matches!(
+            config.server[0].protocol,
+            ServerProtocolConfig::Vmess {
+                transport: ServerTransportConfig::WebSocket { .. },
+                security: ServerTransportSecurity::None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            config.server[1].protocol,
+            ServerProtocolConfig::Vless {
+                security: ServerTransportSecurity::Reality { .. },
+                ..
+            }
+        ));
+        assert!(matches!(config.server[2].protocol, ServerProtocolConfig::Trojan { .. }));
+        assert!(matches!(
+            config.server[3].protocol,
+            ServerProtocolConfig::Hysteria2 { .. }
+        ));
+        assert!(matches!(config.server[4].protocol, ServerProtocolConfig::AnyTls { .. }));
+
+        let serialized = config.to_string();
+        let reparsed = Config::load_from_str(&serialized, ConfigType::Local).expect("serialized config");
+        assert_eq!(reparsed.server[0].protocol, config.server[0].protocol);
+        assert_eq!(reparsed.server[1].protocol, config.server[1].protocol);
+        assert_eq!(reparsed.server[2].protocol, config.server[2].protocol);
+        assert_eq!(reparsed.server[3].protocol, config.server[3].protocol);
+        assert_eq!(reparsed.server[4].protocol, config.server[4].protocol);
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn non_shadowsocks_primary_protocol_is_client_only() {
+        let source = r#"
+        {
+          "servers": [{
+            "protocol": "vless", "server": "127.0.0.1", "server_port": 443,
+            "uuid": "550e8400-e29b-41d4-a716-446655440000"
+          }]
+        }
+        "#;
+        assert!(Config::load_from_str(source, ConfigType::Server).is_err());
+    }
+
+    #[test]
+    fn primary_protocol_debug_redacts_credentials() {
+        let protocol = ServerProtocolConfig::Trojan {
+            password: "must-not-leak".to_owned(),
+            transport: ServerTransportConfig::Tcp,
+            security: ServerTransportSecurity::None,
+        };
+        let debug = format!("{protocol:?}");
+        assert!(!debug.contains("must-not-leak"));
+        assert!(debug.contains("<redacted>"));
     }
 }
