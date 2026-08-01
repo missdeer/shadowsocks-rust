@@ -58,6 +58,8 @@ Related Projects:
 
 - `local-online-config` - [SIP008](https://shadowsocks.org/doc/sip008.html) Online Configuration Delivery
 
+- `multi-protocol` - Enable client-side VMess, VLESS, Trojan, Hysteria, Hysteria 2, and AnyTLS primary servers. This feature is included in `full`.
+
 - `stream-cipher` - Enable deprecated stream ciphers. WARN: stream ciphers are UNSAFE!
 
 - `aead-cipher-extra` - Enable non-standard AEAD ciphers
@@ -372,11 +374,55 @@ Start local client with configuration file
 sslocal -c /path/to/shadowsocks.json
 ```
 
-`sslocal` supports appending TCP proxy hops after its configured Shadowsocks server with the `outbound_proxy`
-config key. The normal `server` is always the physical first hop; `outbound_proxy` entries follow it in array order,
+### Additional client protocols
+
+With the `multi-protocol` feature, `sslocal` can use the following protocols as its primary server. These protocols
+are client-only and TCP-only; they cannot be used by `ssserver` or `ssmanager`. Configure them in the extended
+`servers` array by setting each server's `protocol` field.
+
+| Protocol | `protocol` value | Required credentials | Implemented transport and security |
+| --- | --- | --- | --- |
+| VMess | `vmess` | `uuid` | TCP or WebSocket; plain or TLS; VMess AEAD (`alter_id` must be `0`) |
+| VLESS | `vless` | `uuid` | TCP or WebSocket; plain or TLS; REALITY over TCP; XTLS-RPRX-Vision over REALITY/TCP |
+| Trojan | `trojan` | `password` | TCP or WebSocket; TLS by default |
+| Hysteria | `hysteria` | `password` | Hysteria v1 QUIC/TLS TCP tunnels, including custom ALPN and bandwidth fields |
+| Hysteria 2 | `hysteria2` or `hy2` | `password` | HTTP/3/QUIC TCP tunnels; optional Salamander obfuscation |
+| AnyTLS | `anytls` | `password` | AnyTLS v2 over TLS |
+
+Example VLESS server using REALITY and XTLS-RPRX-Vision:
+
+```jsonc
+{
+    "servers": [
+        {
+            "protocol": "vless",
+            "server": "vless.example.com",
+            "server_port": 443,
+            "uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "network": "tcp",
+            "security": "reality",
+            "server_name": "cover.example.com",
+            "reality_public_key": "REPLACE_WITH_SERVER_PUBLIC_KEY",
+            "reality_short_id": "0123456789abcdef",
+            "flow": "xtls-rprx-vision"
+        }
+    ],
+    "local_address": "127.0.0.1",
+    "local_port": 1080
+}
+```
+
+`server_name` supplies the SNI for TLS, REALITY, AnyTLS, and Hysteria. For conventional TLS and QUIC/TLS certificate
+verification, `skip_certificate_verification` is available for interoperability testing, but should remain `false`
+in normal use. Hysteria 2 Salamander requires both `"obfs": "salamander"` and `obfs_password`.
+
+`sslocal` supports appending TCP proxy hops after its configured primary server with the `outbound_proxy`
+config key. The configured primary server is always the physical first hop; `outbound_proxy` entries follow it in
+array order,
 and the last entry connects to the requested destination. Supported trailing hop types are `socks5://`, `http://`,
 `https://`, and SIP002 `ss://` URLs. Plain proxy hops accept optional `user:pass@` credentials. A SIP003 plugin
-belongs on the main `server`; plugins on later `ss://` hops are rejected. `sslocal` chains are currently TCP-only,
+is only valid when the primary server is Shadowsocks; plugins on later `ss://` hops are rejected. `sslocal` chains
+are currently TCP-only,
 so UDP traffic is rejected instead of bypassing the chain.
 
 ```jsonc
@@ -1227,6 +1273,7 @@ It supports the following features:
 - [x] Manager APIs, supporting [Manage Multiple Users](https://github.com/shadowsocks/shadowsocks/wiki/Manage-Multiple-Users)
 - [x] ACL (Access Control List)
 - [x] Support HTTP/HTTPS Proxy protocol
+- [x] Client-side VMess, VLESS, Trojan, Hysteria, Hysteria 2, AnyTLS, REALITY, and XTLS-RPRX-Vision
 
 ## TODO
 
