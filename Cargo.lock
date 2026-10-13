@@ -2356,6 +2356,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "obfs-local"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "libc",
+ "rand 0.10.3",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tokio-tfo",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
