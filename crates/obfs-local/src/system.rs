@@ -179,7 +179,7 @@ pub fn switch_user(config: &Config) -> io::Result<()> {
         }
         let (uid, gid) = unsafe { ((*entry).pw_uid, (*entry).pw_gid) };
         // Drop supplementary groups before the primary group and user IDs.
-        if unsafe { libc::initgroups(name.as_ptr(), gid) } != 0
+        if unsafe { libc::initgroups(name.as_ptr(), gid as _) } != 0
             || unsafe { libc::setgid(gid) } != 0
             || unsafe { libc::setuid(uid) } != 0
         {
