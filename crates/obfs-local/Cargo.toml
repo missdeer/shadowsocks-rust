@@ -1,0 +1,21 @@
+[package]
+name = "obfs-local"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Rust client compatible with simple-obfs HTTP/TLS and SIP003"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+base64 = "0.23"
+clap = "4.5"
+rand = "0.10"
+serde_json = "1"
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "signal", "macros", "sync"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", target_os = "freebsd"))'.dependencies]
+tokio-tfo = "0.4"

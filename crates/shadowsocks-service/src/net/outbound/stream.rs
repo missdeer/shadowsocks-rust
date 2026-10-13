@@ -120,7 +120,7 @@ impl OutboundProxyStream {
     /// Try to recover the underlying [`TcpStream`].
     ///
     /// Succeeds only if the stream is still in the unwrapped TCP state
-    /// (i.e. no TLS or HTTP CONNECT layer has been applied). The UDP
+    /// (i.e. no transport or protocol layer has been applied). The UDP
     /// outbound path uses this to obtain a keep-alive connection that is
     /// `Sync`-friendly (`OutboundProxyStream` itself is intentionally not
     /// `Sync` because the HTTP CONNECT variant wraps a
@@ -129,10 +129,7 @@ impl OutboundProxyStream {
     pub fn try_into_tcp(self) -> Result<TcpStream, Self> {
         match self.inner {
             OutboundProxyStreamInner::Bypassed(s) => Ok(s),
-            #[cfg(any(feature = "local-http-native-tls", feature = "local-http-rustls"))]
-            OutboundProxyStreamInner::Https(_) => Err(self),
-            #[cfg(feature = "local-http")]
-            OutboundProxyStreamInner::Http(_) => Err(self),
+            _ => Err(self),
         }
     }
 
