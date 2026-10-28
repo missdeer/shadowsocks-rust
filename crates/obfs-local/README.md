@@ -6,9 +6,13 @@ environment variables. It does not use libev, MinGW, or an external TLS library.
 TLS mode implements simple-obfs's imitation TLS framing, not a TLS session.
 
 ```powershell
-cargo build -p obfs-local --release
+cargo build --release -F obfs-local
 .\target\release\obfs-local.exe -s server.example.com -p 443 -l 1081 --obfs http --obfs-host example.com
 ```
+
+Run this from the repository root. Append `obfs-local` to an existing `-F`
+feature list to build the plugin alongside the Shadowsocks binaries in one command.
+The feature is opt-in and is not included in `full` or `full-extra`.
 
 `sslocal` can use the executable directly through its existing `plugin` field:
 
@@ -53,6 +57,7 @@ Unix-specific operations require verification on Unix.
 
 ```powershell
 cargo test -p obfs-local
+cargo test -F obfs-local --test obfs_local_cli
 cargo clippy -p obfs-local --all-targets -- -D warnings
 ```
 
@@ -68,5 +73,6 @@ Android VPN socket protection and macOS launchd socket activation are not includ
 
 GPL-3.0-or-later, following the simple-obfs source used for this port.
 Original protocol code: copyright (C) 2013-2016 Max Lv. See [COPYING](COPYING).
-This is a separate executable/package; the existing Shadowsocks crates do not
-link to it.
+The protocol implementation remains in its own library crate. The root package
+builds the separate `obfs-local` executable only when its `obfs-local` feature is
+enabled; the Shadowsocks executables do not use the obfs-local implementation.

@@ -60,6 +60,8 @@ Related Projects:
 
 - `multi-protocol` - Enable client-side VMess, VLESS, Trojan, Hysteria, Hysteria 2, and AnyTLS primary servers. This feature is included in `full`.
 
+- `obfs-local` - Build the standalone [simple-obfs compatible client](crates/obfs-local/README.md) (GPL-3.0-or-later). Opt-in; not included in `full` or `full-extra`.
+
 - `stream-cipher` - Enable deprecated stream ciphers. WARN: stream ciphers are UNSAFE!
 
 - `aead-cipher-extra` - Enable non-standard AEAD ciphers
@@ -245,6 +247,9 @@ Use cargo to build. NOTE: **RAM >= 2GiB**
 ```bash
 cargo build --release
 ```
+
+To also build the `obfs-local` plugin, use `cargo build --release -F obfs-local`,
+or append `obfs-local` to your existing `-F` feature list.
 
 Then `sslocal` and `ssserver` will appear in `./target/(debug|release)/`, it works similarly as the two binaries in the official ShadowSocks' implementation.
 

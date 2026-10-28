@@ -3341,6 +3341,7 @@ dependencies = [
  "log",
  "log4rs",
  "mimalloc",
+ "obfs-local",
  "qrcode",
  "rand 0.10.3",
  "reqwest",

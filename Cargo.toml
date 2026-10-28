@@ -44,6 +44,11 @@ name = "sswinservice"
 path = "bin/sswinservice.rs"
 required-features = ["winservice"]
 
+[[bin]]
+name = "obfs-local"
+path = "bin/obfs-local.rs"
+required-features = ["obfs-local"]
+
 [workspace]
 members = ["crates/shadowsocks", "crates/shadowsocks-service", "crates/obfs-local"]
 
@@ -117,6 +122,8 @@ utility = ["qrcode"]
 service = ["local", "server", "manager"]
 # Enable Windows Service
 winservice = ["service", "windows-service"]
+# Build the standalone simple-obfs compatible client (GPL-3.0-or-later).
+obfs-local = ["dep:obfs-local"]
 
 # Enables Hickory-DNS for replacing tokio's builtin DNS resolver
 hickory-dns = ["shadowsocks-service/hickory-dns"]
@@ -253,6 +260,7 @@ snmalloc-rs = { version = "0.7", optional = true }
 rpmalloc = { version = "0.2", optional = true }
 
 shadowsocks-service = { version = "1.25.0", path = "./crates/shadowsocks-service", default-features = false }
+obfs-local = { version = "0.1.0", path = "./crates/obfs-local", optional = true }
 
 windows-service = { version = "0.8", optional = true }
 
